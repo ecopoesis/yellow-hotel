@@ -48,7 +48,10 @@ object Headless {
             s = stepInstruction(s)
             if (steps++ % 0x20000 == 0 && blarggMemoryDone(s)) break
         }
-        if (!blarggMemoryDone(s)) return "timed out (status=${s.cart.ram[0].toInt() and 0xFF})"
+        if (!blarggMemoryDone(s)) {
+            val status = if (s.cart.ram.isEmpty()) "no cart RAM" else "status=${s.cart.ram[0].toInt() and 0xFF}"
+            return "timed out ($status)"
+        }
         val status = s.cart.ram[0].toInt() and 0xFF
         val text = buildString {
             var i = 4
