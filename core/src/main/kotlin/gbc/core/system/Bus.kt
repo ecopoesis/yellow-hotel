@@ -1,6 +1,11 @@
 package gbc.core.system
 
 import gbc.core.api.Ports
+import gbc.core.apu.apuRead
+import gbc.core.apu.apuTick
+import gbc.core.apu.apuWrite
+import gbc.core.apu.waveRamRead
+import gbc.core.apu.waveRamWrite
 import gbc.core.cart.cartRead
 import gbc.core.cart.cartWrite
 import gbc.core.cpu.Sm83Bus
@@ -111,6 +116,8 @@ private fun ioPeek(s: SystemState, reg: Int): Int = when (reg) {
     0x06 -> s.timer.tma
     0x07 -> timerTacRead(s.timer)
     0x0F -> 0xE0 or s.intr.iff
+    in 0x10..0x26 -> apuRead(s.apu, reg)
+    in 0x30..0x3F -> waveRamRead(s.apu, reg - 0x30)
     0x40 -> s.ppu.lcdc
     0x41 -> statRead(s.ppu)
     0x42 -> s.ppu.scy
@@ -182,6 +189,12 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
         // In double speed the CPU clock doubles while the PPU stays real-time:
         // each CPU M-cycle is worth only 2 dots.
         val ppu = ppuTick(state.ppu, state.vram, state.oam, if (state.doubleSpeed) 2 else 4)
+        val apu = apuTick(
+            state.apu,
+            timer.timer.sysCounter,
+            state.doubleSpeed,
+            if (state.doubleSpeed) 2 else 4, // real-time T-cycles
+        )
         val serial = serialTick(state.serial, 4)
         if (serial.emitted >= 0) ports.serial.byte(serial.emitted)
         var iff = state.intr.iff
@@ -192,6 +205,7 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
         state = state.copy(
             timer = timer.timer,
             ppu = ppu.ppu,
+            apu = apu.apu,
             serial = serial.serial,
             intr = if (iff != state.intr.iff) state.intr.copy(iff = iff) else state.intr,
             tCycles = state.tCycles + 4,
@@ -308,6 +322,8 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
             0x06 -> state = state.copy(timer = timerTmaWrite(state.timer, value))
             0x07 -> state = state.copy(timer = timerTacWrite(state.timer, value).timer)
             0x0F -> state = state.copy(intr = state.intr.copy(iff = value and 0x1F))
+            in 0x10..0x26 -> state = state.copy(apu = apuWrite(state.apu, reg, value))
+            in 0x30..0x3F -> state = state.copy(apu = waveRamWrite(state.apu, reg - 0x30, value))
             0x40 -> applyStatUpdate(lcdcWrite(state.ppu, value))
             0x41 -> applyStatUpdate(statWrite(state.ppu, value, dmgGlitch = state.mode == HwMode.Dmg))
             0x42 -> state = state.copy(ppu = state.ppu.copy(scy = value))

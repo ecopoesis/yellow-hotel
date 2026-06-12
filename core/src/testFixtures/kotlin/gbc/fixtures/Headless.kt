@@ -52,8 +52,8 @@ object Headless {
      * Runs a Blargg test ROM that reports through cart RAM: status at 0xA000
      * (0x80 = running, 0 = pass), signature DE B0 61 at 0xA001-3, text after.
      */
-    fun runBlarggMemory(rom: ByteArray, maxEmulatedSeconds: Int = 120): String {
-        var s = boot(rom)
+    fun runBlarggMemory(rom: ByteArray, mode: HwMode = HwMode.Dmg, maxEmulatedSeconds: Int = 120): String {
+        var s = boot(rom, mode)
         val limit = maxEmulatedSeconds * CYCLES_PER_SECOND
         var steps = 0
         while (s.tCycles < limit) {

@@ -2,6 +2,7 @@ package gbc.core.system
 
 import gbc.core.cart.CartridgeState
 import gbc.core.cart.CgbFlag
+import gbc.core.apu.ApuState
 import gbc.core.cpu.CpuState
 import gbc.core.dma.HdmaState
 import gbc.core.dma.OamDmaState
@@ -32,6 +33,7 @@ data class SystemState(
     val ppu: PpuState,
     val joypad: JoypadState,
     val hdma: HdmaState,
+    val apu: ApuState,
     val svbk: Int = 1,
     val doubleSpeed: Boolean = false,
     val key1Armed: Boolean = false,
@@ -79,6 +81,7 @@ fun postBootState(cart: CartridgeState, mode: HwMode = defaultMode(cart)): Syste
         ppu = PpuState(cgb = mode == HwMode.Cgb),
         joypad = JoypadState(),
         hdma = HdmaState(),
+        apu = ApuState(dmgMode = mode == HwMode.Dmg),
         wram = ByteArray(8 * 0x1000),
         hram = ByteArray(0x7F),
         vram = ByteArray(2 * 0x2000),
