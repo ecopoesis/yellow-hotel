@@ -6,6 +6,8 @@ import gbc.core.cart.cartWrite
 import gbc.core.cpu.Sm83Bus
 import gbc.core.cpu.stepCpu
 import gbc.core.dma.dmaRequest
+import gbc.core.joypad.p1Read
+import gbc.core.joypad.p1Write
 import gbc.core.ppu.PpuMode
 import gbc.core.ppu.StatUpdate
 import gbc.core.ppu.lcdcWrite
@@ -13,6 +15,8 @@ import gbc.core.ppu.lycWrite
 import gbc.core.ppu.ppuTick
 import gbc.core.ppu.statRead
 import gbc.core.ppu.statWrite
+import gbc.core.serial.serialCtrlWrite
+import gbc.core.serial.serialTick
 import gbc.core.timer.timerDivRead
 import gbc.core.timer.timerDivWrite
 import gbc.core.timer.timerTacRead
@@ -32,11 +36,28 @@ fun stepInstruction(s: SystemState, ports: Ports = Ports.NONE): SystemState {
     return bus.state.copy(cpu = cpu)
 }
 
-/** Steps until the PPU completes a frame; the returned state has the ready flag consumed. */
+/** Steps until the PPU completes a frame; samples host input at the frame boundary. */
 fun stepFrame(s: SystemState, ports: Ports = Ports.NONE): SystemState {
-    var state = s
+    var state = withButtons(s, ports.input.buttons())
     while (!state.ppu.frameReady) state = stepInstruction(state, ports)
     return state.copy(ppu = state.ppu.copy(frameReady = false))
+}
+
+/**
+ * Injects the host button state (a [gbc.core.api.Button] mask). New presses on
+ * selected P1 lines request the joypad interrupt, and any press wakes STOP.
+ */
+fun withButtons(s: SystemState, buttons: Int): SystemState {
+    if (buttons == s.joypad.buttons) return s
+    val pressed = buttons and s.joypad.buttons.inv()
+    val sel = s.joypad.select
+    val irq = (pressed and 0xF != 0 && sel and 0x10 == 0) ||
+        ((pressed shr 4) and 0xF != 0 && sel and 0x20 == 0)
+    return s.copy(
+        joypad = s.joypad.copy(buttons = buttons),
+        intr = if (irq) s.intr.copy(iff = s.intr.iff or 0x10) else s.intr,
+        cpu = if (pressed != 0 && s.cpu.stopped) s.cpu.copy(stopped = false) else s.cpu,
+    )
 }
 
 /**
@@ -57,6 +78,7 @@ fun peek(s: SystemState, addr: Int): Int = when {
 }
 
 private fun ioPeek(s: SystemState, reg: Int): Int = when (reg) {
+    0x00 -> p1Read(s.joypad)
     0x01 -> s.serial.data
     0x02 -> s.serial.ctrl or 0x7E
     0x04 -> timerDivRead(s.timer)
@@ -117,13 +139,17 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
         tickDma()
         val timer = timerTick(state.timer)
         val ppu = ppuTick(state.ppu, state.vram, state.oam, 4)
+        val serial = serialTick(state.serial, 4)
+        if (serial.emitted >= 0) ports.serial.byte(serial.emitted)
         var iff = state.intr.iff
         if (timer.irq) iff = iff or 0x04
         if (ppu.irqVblank) iff = iff or 0x01
         if (ppu.irqStat) iff = iff or 0x02
+        if (serial.irq) iff = iff or 0x08
         state = state.copy(
             timer = timer.timer,
             ppu = ppu.ppu,
+            serial = serial.serial,
             intr = if (iff != state.intr.iff) state.intr.copy(iff = iff) else state.intr,
             tCycles = state.tCycles + 4,
         )
@@ -189,8 +215,9 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
 
     private fun ioWrite(reg: Int, value: Int) {
         when (reg) {
+            0x00 -> state = state.copy(joypad = p1Write(state.joypad, value))
             0x01 -> state = state.copy(serial = state.serial.copy(data = value))
-            0x02 -> serialControl(value)
+            0x02 -> state = state.copy(serial = serialCtrlWrite(state.serial, value))
             0x04 -> state = state.copy(timer = timerDivWrite(state.timer).timer)
             0x05 -> state = state.copy(timer = timerTimaWrite(state.timer, value))
             0x06 -> state = state.copy(timer = timerTmaWrite(state.timer, value))
@@ -219,20 +246,4 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
         )
     }
 
-    /**
-     * Until M5 brings real bit-clocking, an internally-clocked transfer
-     * completes instantly: the byte goes to the host port, 0xFF shifts in
-     * (nothing on the other end), and the serial interrupt is requested.
-     */
-    private fun serialControl(value: Int) {
-        if (value and 0x81 == 0x81) {
-            ports.serial.byte(state.serial.data)
-            state = state.copy(
-                serial = SerialState(data = 0xFF, ctrl = value and 0x7F),
-                intr = state.intr.copy(iff = state.intr.iff or 0x08),
-            )
-        } else {
-            state = state.copy(serial = state.serial.copy(ctrl = value))
-        }
-    }
 }

@@ -4,7 +4,9 @@ import gbc.core.cart.CartridgeState
 import gbc.core.cart.CgbFlag
 import gbc.core.cpu.CpuState
 import gbc.core.dma.OamDmaState
+import gbc.core.joypad.JoypadState
 import gbc.core.ppu.PpuState
+import gbc.core.serial.SerialState
 import gbc.core.timer.TimerState
 
 enum class HwMode { Dmg, Cgb }
@@ -12,11 +14,6 @@ enum class HwMode { Dmg, Cgb }
 data class InterruptState(
     val iff: Int = 0xE1, // IF: post-boot has VBlank already requested
     val ie: Int = 0x00,
-)
-
-data class SerialState(
-    val data: Int = 0x00, // FF01 SB
-    val ctrl: Int = 0x7E, // FF02 SC (unused bits read as 1)
 )
 
 /**
@@ -32,6 +29,7 @@ data class SystemState(
     val timer: TimerState,
     val dma: OamDmaState,
     val ppu: PpuState,
+    val joypad: JoypadState,
     val wram: ByteArray,  // 8 x 4 KiB; DMG uses banks 0-1
     val hram: ByteArray,  // 127 bytes
     val vram: ByteArray,  // 2 x 8 KiB; plain RAM until the PPU owns it (M4)
@@ -65,8 +63,6 @@ fun postBootState(cart: CartridgeState, mode: HwMode = defaultMode(cart)): Syste
             sp = 0xFFFE, pc = 0x0100,
         )
     }
-    val io = ByteArray(0x80)
-    io[0x00] = 0xCF.toByte() // P1: nothing pressed
     return SystemState(
         cpu = cpu,
         cart = cart,
@@ -76,11 +72,12 @@ fun postBootState(cart: CartridgeState, mode: HwMode = defaultMode(cart)): Syste
         timer = TimerState(sysCounter = 0xAB00),
         dma = OamDmaState(),
         ppu = PpuState(),
+        joypad = JoypadState(),
         wram = ByteArray(8 * 0x1000),
         hram = ByteArray(0x7F),
         vram = ByteArray(2 * 0x2000),
         oam = ByteArray(0xA0),
-        io = io,
+        io = ByteArray(0x80),
         mode = mode,
     )
 }

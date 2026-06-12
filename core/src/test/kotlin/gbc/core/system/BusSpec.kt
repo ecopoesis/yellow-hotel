@@ -157,6 +157,7 @@ class BusSpec : FunSpec({
 
     test("an internally-clocked serial transfer emits the byte, requests the interrupt, and shifts in 0xFF") {
         val sent = mutableListOf<Int>()
+        // start the transfer, then idle on NOPs while it clocks out (8 bits x 512 T)
         val s = run(
             systemWith(
                 0x3E, 0x69, // LD A,0x69
@@ -164,7 +165,7 @@ class BusSpec : FunSpec({
                 0x3E, 0x81, // LD A,0x81
                 0xE0, 0x02, // LDH (FF02),A
             ),
-            4,
+            4 + 1200,
             Ports(serial = SerialOut { sent += it }),
         )
         sent shouldBe listOf(0x69)
@@ -254,6 +255,14 @@ class BusSpec : FunSpec({
             4,
         )
         s.cpu.a shouldBe 0xAB
+    }
+
+    test("stepFrame runs to the next completed frame and consumes the ready flag") {
+        val s = stepFrame(systemWith(0x18, 0xFE)) // spin loop, default ports
+        s.ppu.frameReady shouldBe false
+        s.ppu.ly shouldBe 144 // a frame completes when VBlank begins
+        // 144 lines x 456 dots, plus the tail of the instruction that crossed the boundary
+        (s.tCycles - 65664L in 0..16) shouldBe true
     }
 
     test("system state uses identity equality") {
