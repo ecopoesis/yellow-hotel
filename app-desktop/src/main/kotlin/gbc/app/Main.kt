@@ -16,7 +16,6 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
@@ -42,7 +41,7 @@ private fun keyToButton(key: Key): Int = when (key) {
     Key.X -> Button.A
     Key.Z -> Button.B
     Key.ShiftLeft, Key.ShiftRight -> Button.SELECT
-    Key.Enter -> Button.START
+    Key.Enter, Key.NumPadEnter -> Button.START
     else -> 0
 }
 
@@ -61,6 +60,20 @@ fun main(args: Array<String>) {
             },
             title = "yellow-hotel — ${romFile.nameWithoutExtension}",
             state = rememberWindowState(width = (SCREEN_W * 3).dp, height = (SCREEN_H * 3 + 28).dp),
+            // Window-level handler: sees every key regardless of compose focus
+            // (a Box modifier only gets events when its node owns focus).
+            onPreviewKeyEvent = { event ->
+                val mask = keyToButton(event.key)
+                if (mask != 0) {
+                    when (event.type) {
+                        KeyEventType.KeyDown -> emulator.buttons = emulator.buttons or mask
+                        KeyEventType.KeyUp -> emulator.buttons = emulator.buttons and mask.inv()
+                    }
+                    true
+                } else {
+                    false
+                }
+            },
         ) {
             var painter by remember { mutableStateOf<BitmapPainter?>(null) }
             val pixels = remember { ByteArray(SCREEN_W * SCREEN_H * 4) }
@@ -90,19 +103,7 @@ fun main(args: Array<String>) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black)
-                    .onPreviewKeyEvent { event ->
-                        val mask = keyToButton(event.key)
-                        if (mask != 0) {
-                            when (event.type) {
-                                KeyEventType.KeyDown -> emulator.buttons = emulator.buttons or mask
-                                KeyEventType.KeyUp -> emulator.buttons = emulator.buttons and mask.inv()
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    },
+                    .background(Color.Black),
             ) {
                 painter?.let {
                     Image(
