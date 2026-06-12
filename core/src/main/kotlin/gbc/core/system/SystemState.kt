@@ -41,7 +41,6 @@ data class SystemState(
     val hram: ByteArray,  // 127 bytes
     val vram: ByteArray,  // 2 x 8 KiB; plain RAM until the PPU owns it (M4)
     val oam: ByteArray,   // 160 bytes
-    val io: ByteArray,    // 0xFF00..0xFF7F raw backing until components claim registers
     val mode: HwMode,
     val tCycles: Long = 0,
 ) {
@@ -86,7 +85,6 @@ fun postBootState(cart: CartridgeState, mode: HwMode = defaultMode(cart)): Syste
         hram = ByteArray(0x7F),
         vram = ByteArray(2 * 0x2000),
         oam = ByteArray(0xA0),
-        io = ByteArray(0x80),
         mode = mode,
     )
 }

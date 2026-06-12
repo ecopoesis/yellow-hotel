@@ -177,8 +177,13 @@ fun ppuTick(p: PpuState, vram: ByteArray, oam: ByteArray, dots: Int): PpuTick {
     return PpuTick(run.toState(), run.irqVblank, run.irqStat)
 }
 
+/**
+ * Mutable working state for the PPU, reusable across many dots so the bus can
+ * amortize state materialization over a whole CPU instruction. Per-dot
+ * semantics are identical to calling [ppuTick] once per M-cycle.
+ */
 @Suppress("TooManyFunctions")
-private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: ByteArray) {
+internal class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: ByteArray) {
     private val lcdc = s.lcdc
     private val statEnables = s.statEnables
     private val scy = s.scy
@@ -227,6 +232,22 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
     private var spriteFetchIdx = s.spriteFetchIdx
     var irqVblank = false
     var irqStat = false
+
+    /** Live views for the bus: cheap reads that do not require materializing. */
+    val modeNow get() = mode
+    val lyNow get() = ly
+    val lycFlagNow get() = lycFlag
+    val frameReadyNow get() = frameReady
+
+    /** Returns pending IRQs as IF bits (vblank=1, stat=2) and clears them. */
+    fun consumeIrqs(): Int {
+        var bits = 0
+        if (irqVblank) bits = bits or 0x01
+        if (irqStat) bits = bits or 0x02
+        irqVblank = false
+        irqStat = false
+        return bits
+    }
 
     fun toState() = PpuState(
         lcdc, statEnables, scy, scx, ly, lyc, bgp, obp0, obp1, wy, wx, mode, dotInLine,

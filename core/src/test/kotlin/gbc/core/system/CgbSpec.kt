@@ -115,6 +115,14 @@ class CgbSpec : FunSpec({
         s.cpu.a shouldBe 0xFE // bit7 = double speed, armed cleared
     }
 
+    test("the speed switch also applies inside whole-frame stepping") {
+        var s = cgbSystem(0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x18, 0xFE) // arm KEY1; STOP; spin
+        s = stepFrame(s)
+        s.doubleSpeed shouldBe true
+        s.cpu.stopped shouldBe false
+        s.ppu.frameReady shouldBe false
+    }
+
     test("in double speed the PPU runs at half the dots per M-cycle") {
         var s = run(cgbSystem(0x3E, 0x01, 0xE0, 0x4D, 0x10), 3) // enter double speed
         val dotsBefore = s.ppu.ly * 456 + s.ppu.dot

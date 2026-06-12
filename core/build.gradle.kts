@@ -94,6 +94,8 @@ val perfTest by tasks.registering(Test::class) {
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
     systemProperty("kotest.tags", "Perf")
+    systemProperty("game.rom", rootProject.layout.projectDirectory.file("Pokemon Yellow.gbc").asFile.absolutePath)
+    systemProperty("perf.multiple", findProperty("perfMultiple") as String? ?: "4")
 }
 
 kover {

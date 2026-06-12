@@ -113,15 +113,6 @@ private val READ_MASK = intArrayOf(
     0x00, 0x00, 0x70, // NR50-52
 )
 
-class ApuTick(val apu: ApuState)
-
-fun apuTick(a: ApuState, sysCounter: Int, doubleSpeed: Boolean, tCycles: Int): ApuTick {
-    val run = ApuRun(a)
-    val divBit = (sysCounter shr (if (doubleSpeed) 13 else 12)) and 1
-    run.tick(divBit == 1, tCycles)
-    return ApuTick(run.toState())
-}
-
 fun apuRead(a: ApuState, reg: Int): Int {
     val raw = when (reg) {
         0x10 -> (a.ch1.sweepPeriod shl 4) or (if (a.ch1.sweepNegate) 8 else 0) or a.ch1.sweepShift
@@ -421,8 +412,12 @@ private fun trigger4(a: ApuState, value: Int): ApuState {
     return a.copy(ch4 = c)
 }
 
+/**
+ * Mutable working state for the APU, reusable across many M-cycles so the bus
+ * can amortize state materialization over a whole CPU instruction.
+ */
 @Suppress("TooManyFunctions")
-private class ApuRun(s: ApuState) {
+internal class ApuRun(s: ApuState) {
     private val dmgMode = s.dmgMode
     private val enabled = s.enabled
     private var frameStep = s.frameStep
@@ -442,10 +437,47 @@ private class ApuRun(s: ApuState) {
     private var accR = s.accR
     private var accN = s.accN
 
-    fun toState() = ApuState(
-        dmgMode, enabled, frameStep, lastDivBit, ch1, ch2, ch3, ch4, nr50, nr51,
-        waveRam, samples, sampleHead, sampleCount, sampleClock, accL, accR, accN,
-    )
+    // Per-T-cycle hot fields live in locals; flushed back into the channel
+    // data classes once per tick (copying per T-cycle dominated the profile).
+    private var ch1Timer = s.ch1.freqTimer
+    private var ch1Duty = s.ch1.dutyPos
+    private var ch2Timer = s.ch2.freqTimer
+    private var ch2Duty = s.ch2.dutyPos
+    private var ch3Timer = s.ch3.freqTimer
+    private var ch3Pos = s.ch3.position
+    private var ch3Sample = s.ch3.sampleBuffer
+    private var ch3Just = s.ch3.justAccessed
+    private var ch4Timer = s.ch4.freqTimer
+    private var ch4Lfsr = s.ch4.lfsr
+
+    fun toState(): ApuState {
+        val c1 = if (ch1.freqTimer != ch1Timer || ch1.dutyPos != ch1Duty) {
+            ch1.copy(freqTimer = ch1Timer, dutyPos = ch1Duty)
+        } else {
+            ch1
+        }
+        val c2 = if (ch2.freqTimer != ch2Timer || ch2.dutyPos != ch2Duty) {
+            ch2.copy(freqTimer = ch2Timer, dutyPos = ch2Duty)
+        } else {
+            ch2
+        }
+        val c3 = if (ch3.freqTimer != ch3Timer || ch3.position != ch3Pos ||
+            ch3.sampleBuffer != ch3Sample || ch3.justAccessed != ch3Just
+        ) {
+            ch3.copy(freqTimer = ch3Timer, position = ch3Pos, sampleBuffer = ch3Sample, justAccessed = ch3Just)
+        } else {
+            ch3
+        }
+        val c4 = if (ch4.freqTimer != ch4Timer || ch4.lfsr != ch4Lfsr) {
+            ch4.copy(freqTimer = ch4Timer, lfsr = ch4Lfsr)
+        } else {
+            ch4
+        }
+        return ApuState(
+            dmgMode, enabled, frameStep, lastDivBit, c1, c2, c3, c4, nr50, nr51,
+            waveRam, samples, sampleHead, sampleCount, sampleClock, accL, accR, accN,
+        )
+    }
 
     fun tick(divBit: Boolean, tCycles: Int) {
         if (enabled) {
@@ -533,65 +565,52 @@ private class ApuRun(s: ApuState) {
 
     private fun tickChannels() {
         if (ch1.enabled) {
-            var t = ch1.freqTimer - 1
-            if (t <= 0) {
-                t = (2048 - ch1.freq) * 4
-                ch1 = ch1.copy(dutyPos = (ch1.dutyPos + 1) and 7)
+            if (--ch1Timer <= 0) {
+                ch1Timer = (2048 - ch1.freq) * 4
+                ch1Duty = (ch1Duty + 1) and 7
             }
-            ch1 = ch1.copy(freqTimer = t)
         }
         if (ch2.enabled) {
-            var t = ch2.freqTimer - 1
-            if (t <= 0) {
-                t = (2048 - ch2.freq) * 4
-                ch2 = ch2.copy(dutyPos = (ch2.dutyPos + 1) and 7)
+            if (--ch2Timer <= 0) {
+                ch2Timer = (2048 - ch2.freq) * 4
+                ch2Duty = (ch2Duty + 1) and 7
             }
-            ch2 = ch2.copy(freqTimer = t)
         }
         if (ch3.enabled) {
-            var t = ch3.freqTimer - 1
-            var justAccessed = false
-            if (t <= 0) {
-                t = (2048 - ch3.freq) * 2
-                val pos = (ch3.position + 1) % 32
-                val byte = waveRam[pos / 2].toInt() and 0xFF
-                val nibble = if (pos and 1 == 0) byte shr 4 else byte and 0xF
-                ch3 = ch3.copy(position = pos, sampleBuffer = nibble)
-                justAccessed = true
+            ch3Just = false
+            if (--ch3Timer <= 0) {
+                ch3Timer = (2048 - ch3.freq) * 2
+                ch3Pos = (ch3Pos + 1) % 32
+                val byte = waveRam[ch3Pos / 2].toInt() and 0xFF
+                ch3Sample = if (ch3Pos and 1 == 0) byte shr 4 else byte and 0xF
+                ch3Just = true
             }
-            ch3 = ch3.copy(freqTimer = t, justAccessed = justAccessed)
         }
         if (ch4.enabled) {
-            var t = ch4.freqTimer - 1
-            if (t <= 0) {
-                t = NOISE_DIVISOR[ch4.divisorCode] shl ch4.clockShift
-                var lfsr = ch4.lfsr
-                val xor = (lfsr and 1) xor ((lfsr shr 1) and 1)
-                lfsr = (lfsr shr 1) or (xor shl 14)
-                if (ch4.widthMode) lfsr = (lfsr and 0x40.inv()) or (xor shl 6)
-                ch4 = ch4.copy(lfsr = lfsr)
+            if (--ch4Timer <= 0) {
+                ch4Timer = NOISE_DIVISOR[ch4.divisorCode] shl ch4.clockShift
+                val xor = (ch4Lfsr and 1) xor ((ch4Lfsr shr 1) and 1)
+                ch4Lfsr = (ch4Lfsr shr 1) or (xor shl 14)
+                if (ch4.widthMode) ch4Lfsr = (ch4Lfsr and 0x40.inv()) or (xor shl 6)
             }
-            ch4 = ch4.copy(freqTimer = t)
         }
-    }
-
-    private fun channelOutputs(): IntArray {
-        val o1 = if (ch1.enabled && ch1.dacOn && (DUTY[ch1.duty] shr ch1.dutyPos) and 1 == 1) ch1.volume else 0
-        val o2 = if (ch2.enabled && ch2.dacOn && (DUTY[ch2.duty] shr ch2.dutyPos) and 1 == 1) ch2.volume else 0
-        val o3 = if (ch3.enabled && ch3.dacOn && ch3.volumeCode != 0) ch3.sampleBuffer shr (ch3.volumeCode - 1) else 0
-        val o4 = if (ch4.enabled && ch4.dacOn && ch4.lfsr and 1 == 0) ch4.volume else 0
-        return intArrayOf(o1, o2, o3, o4)
     }
 
     private fun sample(tCycles: Int) {
-        val out = channelOutputs()
+        val o1 = if (ch1.enabled && ch1.dacOn && (DUTY[ch1.duty] shr ch1Duty) and 1 == 1) ch1.volume else 0
+        val o2 = if (ch2.enabled && ch2.dacOn && (DUTY[ch2.duty] shr ch2Duty) and 1 == 1) ch2.volume else 0
+        val o3 = if (ch3.enabled && ch3.dacOn && ch3.volumeCode != 0) ch3Sample shr (ch3.volumeCode - 1) else 0
+        val o4 = if (ch4.enabled && ch4.dacOn && ch4Lfsr and 1 == 0) ch4.volume else 0
         var left = 0f
         var right = 0f
-        for (ch in 0..3) {
-            val v = out[ch] / 15f
-            if (nr51 and (1 shl (ch + 4)) != 0) left += v
-            if (nr51 and (1 shl ch) != 0) right += v
-        }
+        if (nr51 and 0x10 != 0) left += o1 / 15f
+        if (nr51 and 0x01 != 0) right += o1 / 15f
+        if (nr51 and 0x20 != 0) left += o2 / 15f
+        if (nr51 and 0x02 != 0) right += o2 / 15f
+        if (nr51 and 0x40 != 0) left += o3 / 15f
+        if (nr51 and 0x04 != 0) right += o3 / 15f
+        if (nr51 and 0x80 != 0) left += o4 / 15f
+        if (nr51 and 0x08 != 0) right += o4 / 15f
         left = left / 4f * (((nr50 shr 4) and 7) + 1) / 8f
         right = right / 4f * ((nr50 and 7) + 1) / 8f
         accL += left * tCycles
