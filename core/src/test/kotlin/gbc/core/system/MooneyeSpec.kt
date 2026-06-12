@@ -35,10 +35,19 @@ private val M3_TESTS = listOf(
     "intr_timing",
     "reti_intr_timing",
     "halt_ime1_timing",
+    // LY-polling tests, satisfiable since the M4 PPU:
+    "oam_dma_restart",
+    "oam_dma_start",
+    "oam_dma_timing",
+    "halt_ime0_ei",
+    "halt_ime0_nointr_timing",
+    // PPU STAT behavior (M4 gate):
+    "ppu/stat_irq_blocking",
+    "ppu/stat_lyc_onoff",
+    "ppu/intr_1_2_timing-GS",
+    "ppu/vblank_stat_intr-GS",
 )
 
-// These poll LY (wait_ly) so they need the M4 PPU; they join the gate there:
-//   oam_dma_restart, oam_dma_start, oam_dma_timing, halt_ime0_ei, halt_ime0_nointr_timing
 // Deferred to M9 hardening (documented straggler):
 //   timer/rapid_toggle — TAC-toggle edge counting; fails on some real CGB revisions too
 

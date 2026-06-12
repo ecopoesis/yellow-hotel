@@ -38,5 +38,7 @@ class BlarggTimingSpec : FunSpec({
             .shouldContain("Passed")
     }
 
-    // halt_bug.gb waits on the VBlank interrupt, so it gates M4 (PPU), not M3.
+    test("halt_bug") {
+        Headless.runBlarggMemory(blargg.resolve("halt_bug.gb").readBytes()) shouldContain "Passed"
+    }
 })

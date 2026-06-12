@@ -36,6 +36,18 @@ object Headless {
         return "timed out at pc=${"%04X".format(s.cpu.pc)} halted=${s.cpu.halted} stopped=${s.cpu.stopped}"
     }
 
+    /** Runs until the ROM executes `LD B,B` (debug breakpoint), returning the machine state. */
+    fun runUntilBreakpoint(rom: ByteArray, mode: HwMode = HwMode.Dmg, maxEmulatedSeconds: Int = 30): SystemState {
+        var s = boot(rom, mode)
+        val limit = maxEmulatedSeconds * CYCLES_PER_SECOND
+        while (s.tCycles < limit) {
+            val c = s.cpu
+            if (!c.halted && !c.stopped && !c.locked && peek(s, c.pc) == 0x40) return s
+            s = stepInstruction(s)
+        }
+        error("no LD B,B breakpoint reached within $maxEmulatedSeconds emulated seconds (pc=${"%04X".format(s.cpu.pc)})")
+    }
+
     /**
      * Runs a Blargg test ROM that reports through cart RAM: status at 0xA000
      * (0x80 = running, 0 = pass), signature DE B0 61 at 0xA001-3, text after.

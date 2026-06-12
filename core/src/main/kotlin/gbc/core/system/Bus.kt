@@ -6,6 +6,13 @@ import gbc.core.cart.cartWrite
 import gbc.core.cpu.Sm83Bus
 import gbc.core.cpu.stepCpu
 import gbc.core.dma.dmaRequest
+import gbc.core.ppu.PpuMode
+import gbc.core.ppu.StatUpdate
+import gbc.core.ppu.lcdcWrite
+import gbc.core.ppu.lycWrite
+import gbc.core.ppu.ppuTick
+import gbc.core.ppu.statRead
+import gbc.core.ppu.statWrite
 import gbc.core.timer.timerDivRead
 import gbc.core.timer.timerDivWrite
 import gbc.core.timer.timerTacRead
@@ -23,6 +30,13 @@ fun stepInstruction(s: SystemState, ports: Ports = Ports.NONE): SystemState {
     val bus = SystemBus(s, ports)
     val cpu = stepCpu(s.cpu, bus)
     return bus.state.copy(cpu = cpu)
+}
+
+/** Steps until the PPU completes a frame; the returned state has the ready flag consumed. */
+fun stepFrame(s: SystemState, ports: Ports = Ports.NONE): SystemState {
+    var state = s
+    while (!state.ppu.frameReady) state = stepInstruction(state, ports)
+    return state.copy(ppu = state.ppu.copy(frameReady = false))
 }
 
 /**
@@ -50,7 +64,18 @@ private fun ioPeek(s: SystemState, reg: Int): Int = when (reg) {
     0x06 -> s.timer.tma
     0x07 -> timerTacRead(s.timer)
     0x0F -> 0xE0 or s.intr.iff
+    0x40 -> s.ppu.lcdc
+    0x41 -> statRead(s.ppu)
+    0x42 -> s.ppu.scy
+    0x43 -> s.ppu.scx
+    0x44 -> s.ppu.ly
+    0x45 -> s.ppu.lyc
     0x46 -> s.dma.reg
+    0x47 -> s.ppu.bgp
+    0x48 -> s.ppu.obp0
+    0x49 -> s.ppu.obp1
+    0x4A -> s.ppu.wy
+    0x4B -> s.ppu.wx
     else -> if (ioExists(reg)) s.io[reg].toInt() and 0xFF else 0xFF
 }
 
@@ -87,13 +112,19 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
         state = state.copy(intr = state.intr.copy(iff = state.intr.iff and bit.inv()))
     }
 
-    /** One M-cycle of machine time. PPU (M4) and APU (M7) also hook in here. */
+    /** One M-cycle of machine time. The APU (M7) also hooks in here. */
     private fun tick() {
         tickDma()
         val timer = timerTick(state.timer)
+        val ppu = ppuTick(state.ppu, state.vram, state.oam, 4)
+        var iff = state.intr.iff
+        if (timer.irq) iff = iff or 0x04
+        if (ppu.irqVblank) iff = iff or 0x01
+        if (ppu.irqStat) iff = iff or 0x02
         state = state.copy(
             timer = timer.timer,
-            intr = if (timer.irq) state.intr.copy(iff = state.intr.iff or 0x04) else state.intr,
+            ppu = ppu.ppu,
+            intr = if (iff != state.intr.iff) state.intr.copy(iff = iff) else state.intr,
             tCycles = state.tCycles + 4,
         )
     }
@@ -119,20 +150,36 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
      * games run their DMA wait loop from HRAM.)
      */
     private fun readAt(addr: Int): Int = when {
-        !state.dma.running || addr >= 0xFF00 -> peek(state, addr)
-        addr in 0xFE00..0xFE9F -> 0xFF
-        state.dma.conflictsWith(addr) -> state.dma.busByte
+        state.dma.running && addr < 0xFF00 -> when {
+            addr in 0xFE00..0xFE9F -> 0xFF
+            state.dma.conflictsWith(addr) -> state.dma.busByte
+            else -> lockedRead(addr)
+        }
+        else -> lockedRead(addr)
+    }
+
+    /** PPU-mode locking: VRAM is CPU-inaccessible in mode 3, OAM in modes 2 and 3. */
+    private fun lockedRead(addr: Int): Int = when {
+        addr in 0x8000..0x9FFF && vramLocked() -> 0xFF
+        addr in 0xFE00..0xFE9F && oamLocked() -> 0xFF
         else -> peek(state, addr)
     }
+
+    private fun vramLocked(): Boolean =
+        state.ppu.lcdc and 0x80 != 0 && state.ppu.mode == PpuMode.Transfer
+
+    private fun oamLocked(): Boolean =
+        state.ppu.lcdc and 0x80 != 0 &&
+            (state.ppu.mode == PpuMode.Transfer || state.ppu.mode == PpuMode.OamScan)
 
     private fun writeAt(addr: Int, value: Int) {
         when {
             addr < 0x8000 -> state = state.copy(cart = cartWrite(state.cart, addr, value))
-            addr < 0xA000 -> state.vram[addr - 0x8000] = value.toByte()
+            addr < 0xA000 -> if (!vramLocked()) state.vram[addr - 0x8000] = value.toByte()
             addr < 0xC000 -> state = state.copy(cart = cartWrite(state.cart, addr, value))
             addr < 0xE000 -> state.wram[addr - 0xC000] = value.toByte()
             addr < 0xFE00 -> writeAt(addr - 0x2000, value) // echo RAM
-            addr < 0xFEA0 -> if (!state.dma.running) state.oam[addr - 0xFE00] = value.toByte()
+            addr < 0xFEA0 -> if (!state.dma.running && !oamLocked()) state.oam[addr - 0xFE00] = value.toByte()
             addr < 0xFF00 -> {} // prohibited region: ignored
             addr < 0xFF80 -> ioWrite(addr and 0x7F, value)
             addr < 0xFFFF -> state.hram[addr - 0xFF80] = value.toByte()
@@ -149,9 +196,27 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
             0x06 -> state = state.copy(timer = timerTmaWrite(state.timer, value))
             0x07 -> state = state.copy(timer = timerTacWrite(state.timer, value).timer)
             0x0F -> state = state.copy(intr = state.intr.copy(iff = value and 0x1F))
+            0x40 -> applyStatUpdate(lcdcWrite(state.ppu, value))
+            0x41 -> applyStatUpdate(statWrite(state.ppu, value, dmgGlitch = state.mode == HwMode.Dmg))
+            0x42 -> state = state.copy(ppu = state.ppu.copy(scy = value))
+            0x43 -> state = state.copy(ppu = state.ppu.copy(scx = value))
+            0x44 -> {} // LY is read-only
+            0x45 -> state = state.copy(ppu = lycWrite(state.ppu, value))
             0x46 -> state = state.copy(dma = dmaRequest(state.dma, value))
+            0x47 -> state = state.copy(ppu = state.ppu.copy(bgp = value))
+            0x48 -> state = state.copy(ppu = state.ppu.copy(obp0 = value))
+            0x49 -> state = state.copy(ppu = state.ppu.copy(obp1 = value))
+            0x4A -> state = state.copy(ppu = state.ppu.copy(wy = value))
+            0x4B -> state = state.copy(ppu = state.ppu.copy(wx = value))
             else -> if (ioExists(reg)) state.io[reg] = value.toByte()
         }
+    }
+
+    private fun applyStatUpdate(update: StatUpdate) {
+        state = state.copy(
+            ppu = update.ppu,
+            intr = if (update.irq) state.intr.copy(iff = state.intr.iff or 0x02) else state.intr,
+        )
     }
 
     /**

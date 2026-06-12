@@ -57,14 +57,19 @@ fun parseCartridge(bytes: ByteArray): Either<RomError, CartridgeState> = either 
         in 0x19..0x1E -> MbcState.Mbc5()
         else -> raise(RomError.UnsupportedMbc(header.cartType))
     }
+    // Some test ROMs (e.g. Blargg's halt_bug.gb) declare a RAM-bearing mapper but a
+    // zero RAM size; real carts of that type always shipped with at least 8 KiB.
+    val ramBytes = if (header.cartType in RAM_TYPES) maxOf(header.ramBytes, RAM_BANK_SIZE) else header.ramBytes
     CartridgeState(
         header = header,
         rom = bytes,
-        ram = ByteArray(header.ramBytes) { -1 }, // uninitialized cart RAM reads as 0xFF
+        ram = ByteArray(ramBytes) { -1 }, // uninitialized cart RAM reads as 0xFF
         mbc = mbc,
         hasBattery = header.cartType in BATTERY_TYPES,
     )
 }
+
+private val RAM_TYPES = setOf(0x02, 0x03, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x12, 0x13, 0x1A, 0x1B, 0x1D, 0x1E, 0x22)
 
 /** Total: any address the bus routes here yields a byte; absent/disabled RAM reads 0xFF. */
 fun cartRead(cart: CartridgeState, addr: Int): Int = when {

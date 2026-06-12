@@ -43,19 +43,35 @@ class BusSpec : FunSpec({
     }
 
     test("WRAM, HRAM, VRAM, and OAM are readable and writable through the bus") {
-        // LD A,0x42; LD (addr),A for each region; then read back via LD A,(addr)
+        // LCD off first so VRAM/OAM are not mode-locked; then write/read each region.
         for (addr in listOf(0xC123, 0xD456, 0x8123, 0xFE32, 0xFF85)) {
             val s = run(
                 systemWith(
+                    0x3E, 0x00, // LD A,0
+                    0xE0, 0x40, // LDH (LCDC),A: LCD off
                     0x3E, 0x42, // LD A,0x42
                     0xEA, addr and 0xFF, addr shr 8, // LD (addr),A
                     0x3E, 0x00, // LD A,0
                     0xFA, addr and 0xFF, addr shr 8, // LD A,(addr)
                 ),
-                4,
+                6,
             )
             s.cpu.a shouldBe 0x42
         }
+    }
+
+    test("VRAM reads 0xFF and swallows writes during mode 3; OAM during modes 2 and 3") {
+        // With the LCD on at boot (mode 2, dot 0), OAM is locked immediately.
+        val s = run(
+            systemWith(
+                0x3E, 0x42, // LD A,0x42
+                0xEA, 0x32, 0xFE, // LD (0xFE32),A -> swallowed (mode 2)
+                0xFA, 0x32, 0xFE, // LD A,(0xFE32) -> 0xFF
+            ),
+            3,
+        )
+        s.cpu.a shouldBe 0xFF
+        (s.oam[0x32].toInt() and 0xFF) shouldBe 0x00
     }
 
     test("echo RAM mirrors WRAM both ways") {
@@ -206,6 +222,25 @@ class BusSpec : FunSpec({
         )
         s.cpu.a shouldBe 0x33
         run(systemWith(0xF0, 0x02), 1).cpu.a shouldBe 0x7E // SC unused bits high
+    }
+
+    test("PPU registers read back through the bus") {
+        // write 0x42 to each writable PPU register, read it back
+        for (reg in listOf(0x42, 0x43, 0x45, 0x47, 0x48, 0x49, 0x4A, 0x4B)) {
+            val s = run(
+                systemWith(
+                    0x3E, 0x42, // LD A,0x42
+                    0xE0, reg, // LDH (reg),A
+                    0x3E, 0x00,
+                    0xF0, reg, // LDH A,(reg)
+                ),
+                4,
+            )
+            s.cpu.a shouldBe 0x42
+        }
+        // LY is read-only: writes are ignored
+        val s = run(systemWith(0x3E, 0x42, 0xE0, 0x44, 0xF0, 0x44), 3)
+        s.cpu.a shouldBe s.ppu.ly
     }
 
     test("IE reads back through 0xFFFF") {

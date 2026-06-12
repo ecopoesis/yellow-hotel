@@ -32,5 +32,6 @@ data class OamDmaState(
 fun dmaRequest(d: OamDmaState, value: Int): OamDmaState {
     val page = value and 0xFF
     val base = if (page >= 0xE0) (page - 0x20) shl 8 else page shl 8 // echo mirror
-    return d.copy(reg = page, pendingSource = base, pendingDelay = 1)
+    // 2 M-cycles: OAM stays accessible for one full cycle after the FF46 write
+    return d.copy(reg = page, pendingSource = base, pendingDelay = 2)
 }
