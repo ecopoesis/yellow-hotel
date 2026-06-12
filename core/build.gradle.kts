@@ -19,10 +19,12 @@ kotlin {
 dependencies {
     implementation(libs.arrow.core)
     testFixturesImplementation(libs.arrow.core)
+    testFixturesImplementation(libs.kotest.runner)
     testImplementation(libs.kotest.runner)
     testImplementation(libs.kotest.assertions)
     testImplementation(libs.kotest.property)
     testImplementation(libs.kotest.assertions.arrow)
+    testImplementation(libs.kotlinx.serialization.json)
 }
 
 // SM83 SingleStepTests (per-instruction JSON cases incl. cycle-by-cycle bus activity).
@@ -80,6 +82,7 @@ val accuracyTest by tasks.registering(Test::class) {
     classpath = sourceSets["test"].runtimeClasspath
     systemProperty("kotest.tags", "Accuracy")
     systemProperty("sm83.dir", layout.buildDirectory.dir("sm83-tests/v1").get().asFile.absolutePath)
+    (findProperty("sm83.filter") as String?)?.let { systemProperty("sm83.filter", it) }
     systemProperty("testroms.dir", rootProject.layout.projectDirectory.dir("testroms").asFile.absolutePath)
     systemProperty("game.rom", rootProject.layout.projectDirectory.file("Pokemon Yellow.gbc").asFile.absolutePath)
 }
@@ -94,6 +97,12 @@ val perfTest by tasks.registering(Test::class) {
 }
 
 kover {
+    currentProject {
+        sources {
+            // Test harness code, not emulation core
+            excludedSourceSets.add("testFixtures")
+        }
+    }
     reports {
         verify {
             rule("core emulation must be fully covered") {
