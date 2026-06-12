@@ -1,0 +1,18 @@
+# Copyrighted game ROMs and their saves — never commit
+*.gbc
+*.gb
+!testroms/**/*.gb
+!testroms/**/*.gbc
+*.sav
+
+# Build output
+build/
+.gradle/
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+
+# OMC session state
+.omc/

@@ -1,0 +1,21 @@
+[versions]
+kotlin = "2.2.0"
+arrow = "2.1.2"
+kotest = "5.9.1"
+kover = "0.9.1"
+compose = "1.8.2"
+kotlinx-benchmark = "0.4.14"
+
+[libraries]
+arrow-core = { module = "io.arrow-kt:arrow-core", version.ref = "arrow" }
+kotest-runner = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotest-assertions = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
+kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+kotest-assertions-arrow = { module = "io.kotest.extensions:kotest-assertions-arrow", version = "2.0.0" }
+kotlinx-benchmark = { module = "org.jetbrains.kotlinx:kotlinx-benchmark-runtime", version.ref = "kotlinx-benchmark" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+compose = { id = "org.jetbrains.compose", version.ref = "compose" }
+kover = { id = "org.jetbrains.kotlinx.kover", version.ref = "kover" }
