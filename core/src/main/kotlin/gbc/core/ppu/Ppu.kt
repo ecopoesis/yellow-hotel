@@ -11,6 +11,11 @@ private const val LAST_LINE = 153
 /** DMG shades as packed RGB, matching the dmg-acid2 reference convention. */
 private val SHADES = intArrayOf(0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000)
 
+/**
+ * FIFO pixel layout (8 bits per slot, head at the low end):
+ * bits 0-1 color, bits 2-4 palette, bit 5 priority
+ * (BG: tile-attr priority; OBJ: behind-BG flag. DMG OBJ palette is bit 2.)
+ */
 data class PpuState(
     val lcdc: Int = 0x91,
     val statEnables: Int = 0, // STAT bits 3..6 as last written
@@ -30,6 +35,14 @@ data class PpuState(
     val lycFlag: Boolean = true,
     /** First line after LCD enable reports mode 0 during its OAM period. */
     val firstLine: Boolean = false,
+    // CGB:
+    val cgb: Boolean = false,
+    val vbk: Int = 0,
+    val bcps: Int = 0,
+    val ocps: Int = 0,
+    val opri: Int = 0,
+    val bgPal: ByteArray = ByteArray(64) { -1 }, // boot: white
+    val objPal: ByteArray = ByteArray(64) { -1 },
     val windowLine: Int = 0,
     val windowTriggered: Boolean = false,
     val frame: IntArray = IntArray(SCREEN_W * SCREEN_H),
@@ -40,17 +53,19 @@ data class PpuState(
     val fetchPhase: Int = 0,
     val fetchTileX: Int = 0,
     val fetchWindow: Boolean = false,
+    val fetchAttr: Int = 0,
     val tileNum: Int = 0,
     val tileLo: Int = 0,
     val tileHi: Int = 0,
-    val bgFifo: Int = 0, // 2 bits/pixel, head at the low end
+    val bgFifo: Long = 0,
     val bgFifoLen: Int = 0,
-    val objFifo: Int = 0, // 4 bits/pixel: color(2) | palette<<2 | bgPriority<<3
+    val objFifo: Long = 0,
     val objFifoLen: Int = 0,
+    val objFifoSrc: Int = 0, // 4 bits/slot: scan index of the owning sprite
     val sprites: IntArray = IntArray(10), // packed y | x<<8 | tile<<16 | attr<<24
     val spriteCount: Int = 0,
     val spriteDone: Int = 0, // bitmask: sprite already fetched this line
-    val spriteFetchDots: Int = 0, // remaining stall dots; sprite index in spriteFetchIdx
+    val spriteFetchDots: Int = 0, // remaining stall dots
     val spriteFetchIdx: Int = -1,
 ) {
     override fun equals(other: Any?): Boolean = this === other
@@ -59,10 +74,10 @@ data class PpuState(
 
 class PpuTick(val ppu: PpuState, val irqVblank: Boolean, val irqStat: Boolean)
 
+class StatUpdate(val ppu: PpuState, val irq: Boolean)
+
 fun statRead(p: PpuState): Int =
     0x80 or p.statEnables or (if (p.lycFlag) 0x04 else 0) or p.mode.ordinal
-
-class StatUpdate(val ppu: PpuState, val irq: Boolean)
 
 /**
  * The composite STAT interrupt line. Rising edges request the interrupt;
@@ -125,6 +140,36 @@ fun lcdcWrite(p: PpuState, value: Int): StatUpdate {
     }
 }
 
+// CGB palette RAM ports: index register with auto-increment on data writes.
+
+fun bcpsWrite(p: PpuState, value: Int): PpuState = p.copy(bcps = value and 0xBF)
+
+fun ocpsWrite(p: PpuState, value: Int): PpuState = p.copy(ocps = value and 0xBF)
+
+fun bcpdWrite(p: PpuState, value: Int): PpuState {
+    p.bgPal[p.bcps and 0x3F] = value.toByte()
+    return if (p.bcps and 0x80 != 0) p.copy(bcps = 0x80 or ((p.bcps + 1) and 0x3F)) else p
+}
+
+fun ocpdWrite(p: PpuState, value: Int): PpuState {
+    p.objPal[p.ocps and 0x3F] = value.toByte()
+    return if (p.ocps and 0x80 != 0) p.copy(ocps = 0x80 or ((p.ocps + 1) and 0x3F)) else p
+}
+
+fun bcpdRead(p: PpuState): Int = p.bgPal[p.bcps and 0x3F].toInt() and 0xFF
+
+fun ocpdRead(p: PpuState): Int = p.objPal[p.ocps and 0x3F].toInt() and 0xFF
+
+/** RGB555 little-endian palette entry to packed RGB888, per the acid2 formula. */
+private fun rgb555(pal: ByteArray, palIdx: Int, color: Int): Int {
+    val offset = palIdx * 8 + color * 2
+    val raw = (pal[offset].toInt() and 0xFF) or ((pal[offset + 1].toInt() and 0xFF) shl 8)
+    val r = raw and 0x1F
+    val g = (raw shr 5) and 0x1F
+    val b = (raw shr 10) and 0x1F
+    return (((r shl 3) or (r shr 2)) shl 16) or (((g shl 3) or (g shr 2)) shl 8) or ((b shl 3) or (b shr 2))
+}
+
 fun ppuTick(p: PpuState, vram: ByteArray, oam: ByteArray, dots: Int): PpuTick {
     if (p.lcdc and 0x80 == 0) return PpuTick(p, irqVblank = false, irqStat = false)
     val run = PpuRun(p, vram, oam)
@@ -150,6 +195,13 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
     private var statLine = s.statLine
     private var lycFlag = s.lycFlag
     private var firstLine = s.firstLine
+    private val cgb = s.cgb
+    private val vbkKeep = s.vbk
+    private val bcpsKeep = s.bcps
+    private val ocpsKeep = s.ocps
+    private val opri = s.opri
+    private val bgPal = s.bgPal
+    private val objPal = s.objPal
     private var windowLine = s.windowLine
     private var windowTriggered = s.windowTriggered
     private val frame = s.frame
@@ -159,6 +211,7 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
     private var fetchPhase = s.fetchPhase
     private var fetchTileX = s.fetchTileX
     private var fetchWindow = s.fetchWindow
+    private var fetchAttr = s.fetchAttr
     private var tileNum = s.tileNum
     private var tileLo = s.tileLo
     private var tileHi = s.tileHi
@@ -166,6 +219,7 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
     private var bgFifoLen = s.bgFifoLen
     private var objFifo = s.objFifo
     private var objFifoLen = s.objFifoLen
+    private var objFifoSrc = s.objFifoSrc
     private val sprites = s.sprites
     private var spriteCount = s.spriteCount
     private var spriteDone = s.spriteDone
@@ -176,10 +230,10 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
 
     fun toState() = PpuState(
         lcdc, statEnables, scy, scx, ly, lyc, bgp, obp0, obp1, wy, wx, mode, dotInLine,
-        statLine, lycFlag, firstLine, windowLine, windowTriggered, frame, frameReady,
-        lx, discard, fetchPhase, fetchTileX, fetchWindow, tileNum, tileLo, tileHi,
-        bgFifo, bgFifoLen, objFifo, objFifoLen, sprites, spriteCount, spriteDone,
-        spriteFetchDots, spriteFetchIdx,
+        statLine, lycFlag, firstLine, cgb, vbkKeep, bcpsKeep, ocpsKeep, opri, bgPal, objPal,
+        windowLine, windowTriggered, frame, frameReady, lx, discard, fetchPhase, fetchTileX,
+        fetchWindow, fetchAttr, tileNum, tileLo, tileHi, bgFifo, bgFifoLen, objFifo,
+        objFifoLen, objFifoSrc, sprites, spriteCount, spriteDone, spriteFetchDots, spriteFetchIdx,
     )
 
     fun dot() {
@@ -252,6 +306,7 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
         bgFifoLen = 0
         objFifo = 0
         objFifoLen = 0
+        objFifoSrc = 0
     }
 
     private fun transferDot() {
@@ -303,37 +358,44 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
         var row = ly + 16 - y
         if (attr and 0x40 != 0) row = (if (tall) 15 else 7) - row // Y flip
         if (tall) tile = (tile and 0xFE) or (row shr 3)
-        val addr = tile * 16 + (row and 7) * 2
+        val bank = if (cgb) (attr shr 3) and 1 else 0
+        val addr = bank * 0x2000 + tile * 16 + (row and 7) * 2
         val lo = vram[addr].toInt() and 0xFF
         val hi = vram[addr + 1].toInt() and 0xFF
         val xflip = attr and 0x20 != 0
+        val palette = if (cgb) attr and 0x07 else (attr shr 4) and 1
         val skip = maxOf(0, 8 - x) // partially off the left edge
-        var fifo = objFifo
-        var len = objFifoLen
+        // On CGB with OPRI=0 a lower OAM index beats anything already merged;
+        // otherwise (DMG, or OPRI=1) only transparent slots may be filled.
+        val oamPriority = cgb && opri and 1 == 0
         for (px in skip until 8) {
             val bit = if (xflip) px else 7 - px
             val color = ((lo shr bit) and 1) or (((hi shr bit) and 1) shl 1)
             val slot = px - skip
-            val pixel = color or (((attr shr 4) and 1) shl 2) or (((attr shr 7) and 1) shl 3)
-            if (slot < len) {
-                // merge: only fill slots whose existing pixel is transparent
-                if ((fifo shr (slot * 4)) and 3 == 0) {
-                    fifo = (fifo and (0xF shl (slot * 4)).inv()) or (pixel shl (slot * 4))
+            val pixel = (color or (palette shl 2) or (((attr shr 7) and 1) shl 5)).toLong()
+            val shift = slot * 8
+            if (slot < objFifoLen) {
+                val existingColor = (objFifo ushr shift) and 3
+                val existingSrc = (objFifoSrc ushr (slot * 4)) and 0xF
+                val replace = existingColor == 0L || (oamPriority && color != 0 && i < existingSrc)
+                if (replace) {
+                    objFifo = (objFifo and (0xFFL shl shift).inv()) or (pixel shl shift)
+                    objFifoSrc = (objFifoSrc and (0xF shl (slot * 4)).inv()) or (i shl (slot * 4))
                 }
             } else {
-                // grow the fifo with transparent padding up to this slot
-                while (len < slot) len++
-                fifo = fifo or (pixel shl (slot * 4))
-                len++
+                objFifo = objFifo or (pixel shl shift)
+                objFifoSrc = objFifoSrc or (i shl (slot * 4))
+                objFifoLen = slot + 1
             }
         }
-        objFifo = fifo
-        objFifoLen = maxOf(objFifoLen, len)
     }
 
     private fun fetcherStep() {
         when (fetchPhase) {
-            1 -> tileNum = fetchTileNum()
+            1 -> {
+                tileNum = fetchTileNum()
+                fetchAttr = if (cgb) fetchTileAttr() else 0
+            }
             3 -> tileLo = fetchTileData(0)
             5 -> tileHi = fetchTileData(1)
         }
@@ -349,31 +411,39 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
         }
     }
 
-    private fun fetchTileNum(): Int {
+    private fun mapIndex(): Int {
         val mapBit = if (fetchWindow) 0x40 else 0x08
         val base = if (lcdc and mapBit != 0) 0x1C00 else 0x1800
         val row = if (fetchWindow) windowLine else (ly + scy) and 0xFF
         val tx = if (fetchWindow) fetchTileX and 31 else ((scx shr 3) + fetchTileX) and 31
-        return vram[base + (row shr 3) * 32 + tx].toInt() and 0xFF
+        return base + (row shr 3) * 32 + tx
     }
+
+    private fun fetchTileNum(): Int = vram[mapIndex()].toInt() and 0xFF
+
+    private fun fetchTileAttr(): Int = vram[0x2000 + mapIndex()].toInt() and 0xFF
 
     private fun fetchTileData(plane: Int): Int {
         val row = if (fetchWindow) windowLine else (ly + scy) and 0xFF
-        val fineY = row and 7
+        var fineY = row and 7
+        if (fetchAttr and 0x40 != 0) fineY = 7 - fineY // CGB BG Y flip
+        val bank = (fetchAttr shr 3) and 1
         val addr = if (lcdc and 0x10 != 0) {
             tileNum * 16 + fineY * 2 + plane
         } else {
             0x1000 + tileNum.toByte().toInt() * 16 + fineY * 2 + plane
         }
-        return vram[addr].toInt() and 0xFF
+        return vram[bank * 0x2000 + addr].toInt() and 0xFF
     }
 
     private fun pushBgRow() {
-        var fifo = 0
+        val xflip = fetchAttr and 0x20 != 0
+        val meta = ((fetchAttr and 0x07) shl 2) or (((fetchAttr shr 7) and 1) shl 5)
+        var fifo = 0L
         for (px in 0..7) {
-            val bit = 7 - px
+            val bit = if (xflip) px else 7 - px
             val color = ((tileLo shr bit) and 1) or (((tileHi shr bit) and 1) shl 1)
-            fifo = fifo or (color shl (px * 2))
+            fifo = fifo or ((color or meta).toLong() shl (px * 8))
         }
         bgFifo = fifo
         bgFifoLen = 8
@@ -381,34 +451,47 @@ private class PpuRun(s: PpuState, private val vram: ByteArray, private val oam: 
 
     private fun shiftPixel() {
         if (bgFifoLen == 0) return
-        val bgColor = bgFifo and 3
-        bgFifo = bgFifo ushr 2 // logical shift: slot 7's bits can occupy the sign bit
+        val bg = (bgFifo and 0xFF).toInt()
+        bgFifo = bgFifo ushr 8
         bgFifoLen--
-        var objColor = 0
-        var objPal = 0
-        var objPrio = false
+        var obj = 0
         if (objFifoLen > 0) {
-            val o = objFifo and 0xF
-            objFifo = objFifo ushr 4 // logical shift: a behind-BG pixel in slot 7 sets bit 31
+            obj = (objFifo and 0xFF).toInt()
+            objFifo = objFifo ushr 8
+            objFifoSrc = objFifoSrc ushr 4
             objFifoLen--
-            objColor = o and 3
-            objPal = (o shr 2) and 1
-            objPrio = o and 8 != 0
         }
         if (discard > 0) {
             discard--
             return
         }
-        val bgIdx = if (lcdc and 0x01 != 0) bgColor else 0
-        val shade = if (objColor != 0 && (!objPrio || bgIdx == 0)) {
-            val pal = if (objPal == 1) obp1 else obp0
+        frame[ly * SCREEN_W + lx] = if (cgb) mixCgb(bg, obj) else mixDmg(bg, obj)
+        lx++
+        if (lx == SCREEN_W) mode = PpuMode.HBlank
+    }
+
+    private fun mixDmg(bg: Int, obj: Int): Int {
+        val bgIdx = if (lcdc and 0x01 != 0) bg and 3 else 0
+        val objColor = obj and 3
+        return if (objColor != 0 && (obj and 0x20 == 0 || bgIdx == 0)) {
+            val pal = if (obj and 0x04 != 0) obp1 else obp0
             SHADES[(pal shr (objColor * 2)) and 3]
         } else {
             SHADES[(bgp shr (bgIdx * 2)) and 3]
         }
-        frame[ly * SCREEN_W + lx] = shade
-        lx++
-        if (lx == SCREEN_W) mode = PpuMode.HBlank
+    }
+
+    private fun mixCgb(bg: Int, obj: Int): Int {
+        val bgColor = bg and 3
+        val objColor = obj and 3
+        // LCDC bit 0 on CGB is master priority: when clear, sprites always win
+        val masterPriority = lcdc and 0x01 != 0
+        val bgWins = masterPriority && bgColor != 0 && (bg and 0x20 != 0 || obj and 0x20 != 0)
+        return if (objColor != 0 && !bgWins) {
+            rgb555(objPal, (obj shr 2) and 7, objColor)
+        } else {
+            rgb555(bgPal, (bg shr 2) and 7, bgColor)
+        }
     }
 
     private fun updateStatLine() {

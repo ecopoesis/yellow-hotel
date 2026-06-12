@@ -61,4 +61,11 @@ class MooneyeSpec : FunSpec({
             Headless.runMooneye(base.resolve("$name.gb").readBytes()) shouldBe "passed"
         }
     }
+
+    val emulatorOnly = File(System.getProperty("testroms.dir", "../testroms"), "mooneye/emulator-only")
+    for (rom in emulatorOnly.resolve("mbc5").listFiles { f -> f.name.endsWith(".gb") }!!.sorted()) {
+        test("mooneye mbc5/${rom.name}") {
+            Headless.runMooneye(rom.readBytes()) shouldBe "passed"
+        }
+    }
 })

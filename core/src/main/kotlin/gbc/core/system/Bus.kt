@@ -6,12 +6,22 @@ import gbc.core.cart.cartWrite
 import gbc.core.cpu.Sm83Bus
 import gbc.core.cpu.stepCpu
 import gbc.core.dma.dmaRequest
+import gbc.core.dma.hdmaDstHi
+import gbc.core.dma.hdmaDstLo
+import gbc.core.dma.hdmaSrcHi
+import gbc.core.dma.hdmaSrcLo
 import gbc.core.joypad.p1Read
 import gbc.core.joypad.p1Write
 import gbc.core.ppu.PpuMode
 import gbc.core.ppu.StatUpdate
+import gbc.core.ppu.bcpdRead
+import gbc.core.ppu.bcpdWrite
+import gbc.core.ppu.bcpsWrite
 import gbc.core.ppu.lcdcWrite
 import gbc.core.ppu.lycWrite
+import gbc.core.ppu.ocpdRead
+import gbc.core.ppu.ocpdWrite
+import gbc.core.ppu.ocpsWrite
 import gbc.core.ppu.ppuTick
 import gbc.core.ppu.statRead
 import gbc.core.ppu.statWrite
@@ -32,8 +42,18 @@ import gbc.core.timer.timerTmaWrite
  */
 fun stepInstruction(s: SystemState, ports: Ports = Ports.NONE): SystemState {
     val bus = SystemBus(s, ports)
-    val cpu = stepCpu(s.cpu, bus)
-    return bus.state.copy(cpu = cpu)
+    var cpu = stepCpu(s.cpu, bus)
+    var state = bus.state
+    // KEY1 speed switch: STOP with the switch armed toggles speed instead of stopping
+    if (cpu.stopped && state.mode == HwMode.Cgb && state.key1Armed) {
+        cpu = cpu.copy(stopped = false)
+        state = state.copy(
+            doubleSpeed = !state.doubleSpeed,
+            key1Armed = false,
+            timer = state.timer.copy(sysCounter = 0), // the switch resets DIV
+        )
+    }
+    return state.copy(cpu = cpu)
 }
 
 /** Steps until the PPU completes a frame; samples host input at the frame boundary. */
@@ -66,15 +86,20 @@ fun withButtons(s: SystemState, buttons: Int): SystemState {
  */
 fun peek(s: SystemState, addr: Int): Int = when {
     addr < 0x8000 -> cartRead(s.cart, addr)
-    addr < 0xA000 -> s.vram[addr - 0x8000].toInt() and 0xFF // VBK banking lands in M6
+    addr < 0xA000 -> s.vram[s.ppu.vbk * 0x2000 + (addr - 0x8000)].toInt() and 0xFF
     addr < 0xC000 -> cartRead(s.cart, addr)
-    addr < 0xE000 -> s.wram[addr - 0xC000].toInt() and 0xFF // SVBK banking lands in M6
+    addr < 0xE000 -> s.wram[wramIndex(s, addr)].toInt() and 0xFF
     addr < 0xFE00 -> peek(s, addr - 0x2000) // echo RAM
     addr < 0xFEA0 -> s.oam[addr - 0xFE00].toInt() and 0xFF
     addr < 0xFF00 -> 0x00 // prohibited region
     addr < 0xFF80 -> ioPeek(s, addr and 0x7F)
     addr < 0xFFFF -> s.hram[addr - 0xFF80].toInt() and 0xFF
     else -> s.intr.ie
+}
+
+private fun wramIndex(s: SystemState, addr: Int): Int = when {
+    addr < 0xD000 -> addr - 0xC000
+    else -> maxOf(1, s.svbk and 7) * 0x1000 + (addr - 0xD000)
 }
 
 private fun ioPeek(s: SystemState, reg: Int): Int = when (reg) {
@@ -98,14 +123,27 @@ private fun ioPeek(s: SystemState, reg: Int): Int = when (reg) {
     0x49 -> s.ppu.obp1
     0x4A -> s.ppu.wy
     0x4B -> s.ppu.wx
+    0x4D -> if (s.mode == HwMode.Cgb) {
+        0x7E or (if (s.doubleSpeed) 0x80 else 0) or (if (s.key1Armed) 1 else 0)
+    } else {
+        0xFF
+    }
+    0x4F -> if (s.mode == HwMode.Cgb) 0xFE or s.ppu.vbk else 0xFF
+    0x51, 0x52, 0x53, 0x54 -> 0xFF // HDMA setup registers are write-only
+    0x55 -> if (s.mode == HwMode.Cgb) s.hdma.ff55Read() else 0xFF
+    0x68 -> if (s.mode == HwMode.Cgb) 0x40 or s.ppu.bcps else 0xFF
+    0x69 -> if (s.mode == HwMode.Cgb) bcpdRead(s.ppu) else 0xFF
+    0x6A -> if (s.mode == HwMode.Cgb) 0x40 or s.ppu.ocps else 0xFF
+    0x6B -> if (s.mode == HwMode.Cgb) ocpdRead(s.ppu) else 0xFF
+    0x6C -> if (s.mode == HwMode.Cgb) 0xFE or s.ppu.opri else 0xFF
+    0x70 -> if (s.mode == HwMode.Cgb) 0xF8 or s.svbk else 0xFF
     else -> if (ioExists(reg)) s.io[reg].toInt() and 0xFF else 0xFF
 }
 
 /**
- * Registers that exist on DMG hardware. Everything else — gaps and CGB-only
- * registers like KEY1/VBK/SVBK/HDMA — reads 0xFF (open bus). Blargg's runtime
- * depends on this: it probes KEY1 before attempting a speed switch. CGB-mode
- * registers join in M6.
+ * Registers that exist as raw bytes on DMG hardware. Gaps read 0xFF (open
+ * bus). Blargg's runtime depends on this: it probes KEY1 before attempting a
+ * speed switch. CGB-only registers are handled explicitly above.
  */
 private fun ioExists(reg: Int): Boolean = when (reg) {
     0x00 -> true // P1
@@ -134,11 +172,16 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
         state = state.copy(intr = state.intr.copy(iff = state.intr.iff and bit.inv()))
     }
 
+    private fun cgb() = state.mode == HwMode.Cgb
+
     /** One M-cycle of machine time. The APU (M7) also hooks in here. */
     private fun tick() {
         tickDma()
+        val prevPpuMode = state.ppu.mode
         val timer = timerTick(state.timer)
-        val ppu = ppuTick(state.ppu, state.vram, state.oam, 4)
+        // In double speed the CPU clock doubles while the PPU stays real-time:
+        // each CPU M-cycle is worth only 2 dots.
+        val ppu = ppuTick(state.ppu, state.vram, state.oam, if (state.doubleSpeed) 2 else 4)
         val serial = serialTick(state.serial, 4)
         if (serial.emitted >= 0) ports.serial.byte(serial.emitted)
         var iff = state.intr.iff
@@ -153,6 +196,46 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
             intr = if (iff != state.intr.iff) state.intr.copy(iff = iff) else state.intr,
             tCycles = state.tCycles + 4,
         )
+        if (state.hdma.active && ppu.ppu.mode == PpuMode.HBlank &&
+            prevPpuMode != PpuMode.HBlank && ppu.ppu.ly < 144
+        ) {
+            copyHdmaBlock()
+            if (state.hdma.remaining == 0) state = state.copy(hdma = state.hdma.copy(active = false))
+        }
+    }
+
+    private fun copyHdmaBlock() {
+        val h = state.hdma
+        val vramBase = state.ppu.vbk * 0x2000
+        for (i in 0 until 16) {
+            state.vram[vramBase + ((h.dst + i) and 0x1FFF)] = peek(state, (h.src + i) and 0xFFFF).toByte()
+        }
+        state = state.copy(
+            hdma = h.copy(
+                src = (h.src + 16) and 0xFFFF,
+                dst = (h.dst + 16) and 0x1FFF,
+                remaining = h.remaining - 1,
+            ),
+        )
+    }
+
+    private fun hdmaControl(value: Int) {
+        val h = state.hdma
+        if (h.active && value and 0x80 == 0) {
+            state = state.copy(hdma = h.copy(active = false)) // abort, remaining preserved
+            return
+        }
+        val blocks = (value and 0x7F) + 1
+        if (value and 0x80 == 0) {
+            // General-purpose DMA: copy everything now, charging machine time per block
+            state = state.copy(hdma = h.copy(remaining = blocks, active = false))
+            repeat(blocks) {
+                copyHdmaBlock()
+                repeat(8) { tick() }
+            }
+        } else {
+            state = state.copy(hdma = h.copy(active = true, remaining = blocks))
+        }
     }
 
     private fun tickDma() {
@@ -201,9 +284,11 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
     private fun writeAt(addr: Int, value: Int) {
         when {
             addr < 0x8000 -> state = state.copy(cart = cartWrite(state.cart, addr, value))
-            addr < 0xA000 -> if (!vramLocked()) state.vram[addr - 0x8000] = value.toByte()
+            addr < 0xA000 -> if (!vramLocked()) {
+                state.vram[state.ppu.vbk * 0x2000 + (addr - 0x8000)] = value.toByte()
+            }
             addr < 0xC000 -> state = state.copy(cart = cartWrite(state.cart, addr, value))
-            addr < 0xE000 -> state.wram[addr - 0xC000] = value.toByte()
+            addr < 0xE000 -> state.wram[wramIndex(state, addr)] = value.toByte()
             addr < 0xFE00 -> writeAt(addr - 0x2000, value) // echo RAM
             addr < 0xFEA0 -> if (!state.dma.running && !oamLocked()) state.oam[addr - 0xFE00] = value.toByte()
             addr < 0xFF00 -> {} // prohibited region: ignored
@@ -235,6 +320,19 @@ private class SystemBus(var state: SystemState, private val ports: Ports) : Sm83
             0x49 -> state = state.copy(ppu = state.ppu.copy(obp1 = value))
             0x4A -> state = state.copy(ppu = state.ppu.copy(wy = value))
             0x4B -> state = state.copy(ppu = state.ppu.copy(wx = value))
+            0x4D -> if (cgb()) state = state.copy(key1Armed = value and 1 != 0)
+            0x4F -> if (cgb()) state = state.copy(ppu = state.ppu.copy(vbk = value and 1))
+            0x51 -> if (cgb()) state = state.copy(hdma = hdmaSrcHi(state.hdma, value))
+            0x52 -> if (cgb()) state = state.copy(hdma = hdmaSrcLo(state.hdma, value))
+            0x53 -> if (cgb()) state = state.copy(hdma = hdmaDstHi(state.hdma, value))
+            0x54 -> if (cgb()) state = state.copy(hdma = hdmaDstLo(state.hdma, value))
+            0x55 -> if (cgb()) hdmaControl(value)
+            0x68 -> if (cgb()) state = state.copy(ppu = bcpsWrite(state.ppu, value))
+            0x69 -> if (cgb()) state = state.copy(ppu = bcpdWrite(state.ppu, value))
+            0x6A -> if (cgb()) state = state.copy(ppu = ocpsWrite(state.ppu, value))
+            0x6B -> if (cgb()) state = state.copy(ppu = ocpdWrite(state.ppu, value))
+            0x6C -> if (cgb()) state = state.copy(ppu = state.ppu.copy(opri = value and 1))
+            0x70 -> if (cgb()) state = state.copy(svbk = value and 7)
             else -> if (ioExists(reg)) state.io[reg] = value.toByte()
         }
     }

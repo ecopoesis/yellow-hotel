@@ -3,6 +3,7 @@ package gbc.core.system
 import gbc.core.cart.CartridgeState
 import gbc.core.cart.CgbFlag
 import gbc.core.cpu.CpuState
+import gbc.core.dma.HdmaState
 import gbc.core.dma.OamDmaState
 import gbc.core.joypad.JoypadState
 import gbc.core.ppu.PpuState
@@ -30,6 +31,10 @@ data class SystemState(
     val dma: OamDmaState,
     val ppu: PpuState,
     val joypad: JoypadState,
+    val hdma: HdmaState,
+    val svbk: Int = 1,
+    val doubleSpeed: Boolean = false,
+    val key1Armed: Boolean = false,
     val wram: ByteArray,  // 8 x 4 KiB; DMG uses banks 0-1
     val hram: ByteArray,  // 127 bytes
     val vram: ByteArray,  // 2 x 8 KiB; plain RAM until the PPU owns it (M4)
@@ -71,8 +76,9 @@ fun postBootState(cart: CartridgeState, mode: HwMode = defaultMode(cart)): Syste
         // DIV reads ~0xAB right after the DMG boot ROM hands over (exact value: M9, boot_div)
         timer = TimerState(sysCounter = 0xAB00),
         dma = OamDmaState(),
-        ppu = PpuState(),
+        ppu = PpuState(cgb = mode == HwMode.Cgb),
         joypad = JoypadState(),
+        hdma = HdmaState(),
         wram = ByteArray(8 * 0x1000),
         hram = ByteArray(0x7F),
         vram = ByteArray(2 * 0x2000),
