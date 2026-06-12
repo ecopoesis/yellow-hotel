@@ -26,6 +26,37 @@ object SyntheticRom {
         return rom
     }
 
+    /**
+     * A banked ROM where every 16 KiB bank is stamped with its own index at
+     * bankStart+0x150 (low byte) and +0x151 (high byte), so tests can assert
+     * exactly which bank an MBC mapped. Stamps sit outside the header checksum range.
+     */
+    fun banked(
+        romSizeCode: Int,
+        cartType: Int,
+        ramSizeCode: Int = 0x00,
+        cgbFlag: Int = 0x00,
+    ): ByteArray {
+        val size = 0x8000 shl romSizeCode
+        val rom = build(
+            title = "BANKTEST",
+            cgbFlag = cgbFlag,
+            cartType = cartType,
+            romSizeCode = romSizeCode,
+            ramSizeCode = ramSizeCode,
+            actualSize = size,
+        )
+        for (bank in 0 until size / 0x4000) {
+            rom[bank * 0x4000 + 0x150] = bank.toByte()
+            rom[bank * 0x4000 + 0x151] = (bank shr 8).toByte()
+        }
+        return rom
+    }
+
+    /** Reads the bank stamp visible at [region] (0x0000 or 0x4000) through the given read function. */
+    fun stampAt(read: (Int) -> Int, region: Int): Int =
+        read(region + 0x150) or (read(region + 0x151) shl 8)
+
     /** The checksum algorithm the boot ROM runs over 0x134..0x14C. */
     fun headerChecksum(rom: ByteArray): Int {
         var x = 0

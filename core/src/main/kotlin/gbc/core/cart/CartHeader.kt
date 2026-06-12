@@ -13,6 +13,7 @@ sealed interface RomError {
     data class RomSizeMismatch(val declared: Int, val actual: Int) : RomError
     data class InvalidRomSize(val code: Int) : RomError
     data class InvalidRamSize(val code: Int) : RomError
+    data class UnsupportedMbc(val cartType: Int) : RomError
 }
 
 data class CartHeader(
