@@ -10,6 +10,11 @@ fun interface InputSource {
     fun buttons(): Int
 }
 
+/** Consumes 48 kHz stereo float frames; a blocking implementation paces emulation. */
+interface AudioSink {
+    fun push(stereo: FloatArray, frames: Int)
+}
+
 /** Bit masks for [InputSource]: low nibble directions, high nibble buttons. */
 object Button {
     const val RIGHT = 0x01

@@ -6,6 +6,7 @@ plugins {
 rootProject.name = "yellow-hotel"
 
 include(":core")
+include(":app-desktop")
 
 dependencyResolutionManagement {
     repositories {

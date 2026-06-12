@@ -17,7 +17,7 @@ kotlin {
 }
 
 dependencies {
-    implementation(libs.arrow.core)
+    api(libs.arrow.core) // Option/Either appear in the core's public API
     testFixturesImplementation(libs.arrow.core)
     testFixturesImplementation(libs.kotest.runner)
     testImplementation(libs.kotest.runner)
