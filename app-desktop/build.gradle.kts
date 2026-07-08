@@ -25,6 +25,11 @@ tasks.withType<JavaExec> {
     workingDir = rootProject.projectDir
 }
 
+tasks.register<JavaExec>("harness") {
+    mainClass.set("gbc.app.HarnessKt")
+    classpath = sourceSets["main"].runtimeClasspath
+}
+
 compose.desktop {
     application {
         mainClass = "gbc.app.MainKt"
