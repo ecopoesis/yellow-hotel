@@ -147,6 +147,30 @@ class PpuSpec : FunSpec({
         frame[20] shouldBe 0xFFFFFF // gap between them: BG color 0
     }
 
+    test("left-edge sprites obey X priority, not OAM order (invisible-NPC regression)") {
+        // Two sprites both clipped at the left edge overlap screen pixel 0.
+        // On DMG the smaller-X sprite wins even though it sits later in OAM.
+        // Both clip to trigger point lx=0, so the pipeline must compare X
+        // explicitly here — otherwise the low-index far sprite hides the near
+        // one (the overworld "invisible NPC" against the player/Pikachu block).
+        val v = ByteArray(0x4000)
+        val o = ByteArray(0xA0)
+        // tile 1: solid color 3 (both planes); tile 2: solid color 1 (low plane)
+        for (row in 0..7) {
+            v[16 + row * 2] = 0xFF.toByte()
+            v[16 + row * 2 + 1] = 0xFF.toByte()
+            v[32 + row * 2] = 0xFF.toByte()
+        }
+        // sprite 0 (low index) at x=8: covers screen 0..7, uses OBP0
+        o[0] = 16; o[1] = 8; o[2] = 1; o[3] = 0x00
+        // sprite 1 (high index) at x=1: covers only screen 0, smaller X -> wins there
+        o[4] = 16; o[5] = 1; o[6] = 2; o[7] = 0x00
+        // OBP0 maps color 3 -> black, color 1 -> light grey; distinct shades tell them apart
+        val frame = render(PpuState(lcdc = 0x93, bgp = 0xE4, obp0 = 0xE4, ly = 0, dot = 0), v, o)
+        frame[0] shouldBe 0xAAAAAA // near sprite (x=1, color 1) wins pixel 0
+        frame[1] shouldBe 0x000000 // sprite 0 (color 3) owns 1..7 alone
+    }
+
     test("ppu state uses identity equality") {
         val a = PpuState()
         val b = PpuState()

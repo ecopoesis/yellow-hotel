@@ -386,8 +386,12 @@ internal class PpuRun(s: PpuState, private val vram: ByteArray, private val oam:
         val xflip = attr and 0x20 != 0
         val palette = if (cgb) attr and 0x07 else (attr shr 4) and 1
         val skip = maxOf(0, 8 - x) // partially off the left edge
-        // On CGB with OPRI=0 a lower OAM index beats anything already merged;
-        // otherwise (DMG, or OPRI=1) only transparent slots may be filled.
+        // Priority against a pixel already merged into a slot. On CGB with
+        // OPRI=0 a lower OAM index wins; otherwise (DMG, or OPRI=1) the smaller
+        // X wins. Normally X priority falls out of fetch order — a smaller-X
+        // sprite triggers earlier and claims the slot first — but every sprite
+        // clipped at the left edge triggers at lx=0, so there X must be compared
+        // explicitly or the lower-index sprite would wrongly win (invisible NPC).
         val oamPriority = cgb && opri and 1 == 0
         for (px in skip until 8) {
             val bit = if (xflip) px else 7 - px
@@ -398,7 +402,8 @@ internal class PpuRun(s: PpuState, private val vram: ByteArray, private val oam:
             if (slot < objFifoLen) {
                 val existingColor = (objFifo ushr shift) and 3
                 val existingSrc = (objFifoSrc ushr (slot * 4)) and 0xF
-                val replace = existingColor == 0L || (oamPriority && color != 0 && i < existingSrc)
+                val higher = if (oamPriority) i < existingSrc else x < (sprites[existingSrc] shr 8) and 0xFF
+                val replace = existingColor == 0L || (color != 0 && higher)
                 if (replace) {
                     objFifo = (objFifo and (0xFFL shl shift).inv()) or (pixel shl shift)
                     objFifoSrc = (objFifoSrc and (0xF shl (slot * 4)).inv()) or (i shl (slot * 4))
